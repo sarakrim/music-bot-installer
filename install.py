@@ -271,7 +271,7 @@ async def download_music(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     
     await update.message.chat.send_action(ChatAction.TYPING)
-    await update.message.reply_text("⏳ Downloading... Please wait")
+    await update.message.reply_text("⏳ Downloading... Please wait (this may take 1-2 minutes)")
     
     try:
         output_template = str(DOWNLOADS_DIR / "%(title)s.%(ext)s")
@@ -286,6 +286,19 @@ async def download_music(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             'outtmpl': output_template,
             'quiet': False,
             'socket_timeout': 30,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            },
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['web', 'android'],
+                    'player_skip_download_pages': True,
+                }
+            },
+            'socket_timeout': 30,
+            'retries': 10,
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -294,14 +307,14 @@ async def download_music(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             audio_file = Path(filename).with_suffix('.mp3')
             
             if not audio_file.exists():
-                await update.message.reply_text("❌ Download failed")
+                await update.message.reply_text("❌ Download failed - file not created")
                 return
             
             file_size = audio_file.stat().st_size
             
             if file_size > MAX_FILE_SIZE:
                 audio_file.unlink()
-                await update.message.reply_text(f"❌ File too large ({file_size/1024/1024:.1f}MB)")
+                await update.message.reply_text(f"❌ File too large ({file_size/1024/1024:.1f}MB). Max: 50MB")
                 return
             
             await update.message.chat.send_action(ChatAction.UPLOAD_DOCUMENT)
@@ -309,12 +322,16 @@ async def download_music(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             with open(audio_file, 'rb') as f:
                 await update.message.reply_audio(audio=f, title=audio_file.stem)
             
-            logger.info(f"Sent: {audio_file.name}")
+            logger.info(f"✅ Sent: {audio_file.name}")
             audio_file.unlink()
             
     except Exception as e:
         logger.error(f"Error: {e}")
-        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+        error_msg = str(e)[:150]
+        if "Sign in to confirm" in error_msg or "bot" in error_msg.lower():
+            await update.message.reply_text("❌ YouTube blocked the request. Try another video or wait a moment.")
+        else:
+            await update.message.reply_text(f"❌ Error: {error_msg}")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(f"Update {update} caused error {context.error}")
@@ -344,7 +361,10 @@ def main() -> None:
     print("🎵 Music Bot is running...")
     print("Press Ctrl+C to stop")
     
-    application.run_polling()
+    try:
+        application.run_polling()
+    except KeyboardInterrupt:
+        print("\\n\\n🛑 Bot stopped gracefully")
 
 if __name__ == '__main__':
     main()
@@ -370,8 +390,8 @@ if __name__ == '__main__':
             script_content = """@echo off
 cd /d "%~dp0"
 call venv\\Scripts\\activate.bat
-python music_bot.py
-pause
+start "" python music_bot.py
+exit
 """
             with open(script_path, 'w') as f:
                 f.write(script_content)
@@ -380,7 +400,12 @@ pause
             script_content = """#!/bin/bash
 cd "$(dirname "$0")"
 source venv/bin/activate
-python3 music_bot.py
+nohup python3 music_bot.py > bot.log 2>&1 &
+BOT_PID=$!
+echo "🎵 Bot started in background (PID: $BOT_PID)"
+echo "💾 Logs saved to: bot.log"
+echo "🛑 To stop: kill $BOT_PID"
+echo "📺 View logs: tail -f bot.log"
 """
             with open(script_path, 'w') as f:
                 f.write(script_content)
@@ -389,6 +414,20 @@ python3 music_bot.py
         
         print(f"✓ Created startup script: {script_path.name}")
         return script_path
+    
+    def create_stop_script(self):
+        """Create stop script for easy bot stopping"""
+        if self.os_type != "Windows":
+            script_path = self.project_dir / "stop.sh"
+            script_content = """#!/bin/bash
+# Stop the music bot
+pkill -f "python3 music_bot.py"
+echo "🛑 Bot stopped"
+"""
+            with open(script_path, 'w') as f:
+                f.write(script_content)
+            os.chmod(script_path, 0o755)
+            print(f"✓ Created stop script: {script_path.name}")
     
     def print_completion(self):
         """Print completion message"""
@@ -402,7 +441,7 @@ python3 music_bot.py
             print("   Option 2: Run in terminal:")
             print("     venv\\Scripts\\activate.bat && python music_bot.py\n")
         else:
-            print("   Option 1: ./run.sh")
+            print("   Option 1: ./run.sh (runs in background)")
             print("   Option 2: Run in terminal:")
             print("     source venv/bin/activate && python3 music_bot.py\n")
         
@@ -410,7 +449,7 @@ python3 music_bot.py
         print("📝 IMPORTANT:")
         print("  • Keep token.txt safe - never share it")
         print("  • Bot will run and listen for messages")
-        print("  • Press Ctrl+C to stop")
+        print("  • Press Ctrl+C to stop (if running in terminal)")
         print("\n📚 COMMANDS:")
         print("  /start - Welcome message")
         print("  /help  - Help & platforms")
@@ -419,6 +458,14 @@ python3 music_bot.py
         print("  • YouTube, SoundCloud, Spotify")
         print("  • TikTok, Instagram, Twitter/X")
         print("  • And 100+ more platforms!")
+        
+        if self.os_type != "Windows":
+            print("\n🛑 TO STOP THE BOT:")
+            print("  • ./stop.sh")
+            print("  • Or: pkill -f 'python3 music_bot.py'")
+            print("\n📺 TO VIEW LOGS:")
+            print("  • tail -f bot.log")
+        
         print("\n🎵 Happy listening!")
         print("="*60 + "\n")
     
@@ -459,14 +506,15 @@ python3 music_bot.py
         
         # Create startup script
         print("="*60)
-        print("📝 CREATING STARTUP SCRIPT")
+        print("📝 CREATING STARTUP SCRIPTS")
         print("="*60 + "\n")
         if venv_dir:
             try:
                 self.create_startup_script(venv_dir)
-                print("✅ Startup script created successfully\n")
+                self.create_stop_script()
+                print("✅ Startup scripts created successfully\n")
             except Exception as e:
-                print(f"⚠️  Warning: Could not create startup script: {e}\n")
+                print(f"⚠️  Warning: Could not create startup scripts: {e}\n")
         
         # Show completion message
         self.print_completion()
